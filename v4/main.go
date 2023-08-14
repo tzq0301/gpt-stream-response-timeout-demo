@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,11 +13,8 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/samber/lo"
-	"github.com/samber/mo"
 	"github.com/spf13/viper"
 )
-
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 const (
 	configFile = ".env"
@@ -30,7 +28,6 @@ var (
 	openaiAPIKey string
 )
 
-// init Load Config
 func init() {
 	viper.SetConfigFile(configFile)
 	lo.Must0(viper.ReadInConfig())
@@ -39,7 +36,10 @@ func init() {
 }
 
 func main() {
-	messageID, model, respCh := lo.Must3(requestGPT())
+	// stream response
+	// better encapsulate
+
+	messageID, model, respCh := requestGPT()
 
 	fmt.Println()
 	fmt.Printf("MessageID = %s\n", messageID)
@@ -62,36 +62,13 @@ func main() {
 	fmt.Println()
 }
 
-func requestGPT() (string, string, <-chan string, error) {
-	// duration for killing the goroutine for avoiding 'goroutine leak'
-	// duration should be set 99% larger than the duration of real chat in order to not end the chat
-	ctx, cancel := context.WithTimeout(context.TODO(), 2*time.Minute)
+func requestGPT() (messageID string, model string, respCh chan string) {
+	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*7) // wrong example
+	defer cancel()                                                    // it will terminate the handle of the body of stream response in the goroutine
 
-	var httpResult mo.Result[*http.Response]
+	response := httpRequestGPT(ctx)
 
-	select {
-	// duration for achieving the http response (status code, etc.)
-	// if status code can not be got within the duration, then we know current http request is timeout
-	case <-time.After(time.Second * 10):
-		cancel() // terminate the http request
-		return "", "", nil, errors.New("timeout")
-	// got response!!!
-	case httpResult = <-httpRequestGPT(ctx):
-		if httpResult.IsError() {
-			cancel()
-			return "", "", nil, httpResult.Error()
-		}
-	}
-
-	// already got the response, start to handle the coming stream response
-
-	scanner := bufio.NewScanner(httpResult.MustGet().Body) // read the body of stream response line by line
-
-	var (
-		messageID string
-		model     string
-		respCh    chan string
-	)
+	scanner := bufio.NewScanner(response.Body)
 
 	{
 		// handle the first line with block, get the meta information (such as message id, model, etc.)
@@ -106,12 +83,6 @@ func requestGPT() (string, string, <-chan string, error) {
 	respCh = make(chan string)
 
 	go func() {
-		// the timeout of function httpRequestGPT handled does not mean the timeout of httpClient.Do is handled,
-		// the http request is continually hanging, which mean the goroutine is leaked, thus we should cancel the http request
-		// to avoid the goroutine being leaked
-		defer cancel()
-
-		// close the channel when finish
 		defer close(respCh)
 
 		for scanner.Scan() {
@@ -122,8 +93,7 @@ func requestGPT() (string, string, <-chan string, error) {
 			}
 
 			if isFinal(line) {
-				_ = readOneLine(scanner) // discard ""
-				_ = readOneLine(scanner) // discard "data: [DONE]"
+				_ = readOneLine(scanner)
 				break
 			}
 
@@ -131,10 +101,10 @@ func requestGPT() (string, string, <-chan string, error) {
 		}
 	}()
 
-	return messageID, model, respCh, nil
+	return
 }
 
-func httpRequestGPT(ctx context.Context) <-chan mo.Result[*http.Response] {
+func httpRequestGPT(ctx context.Context) *http.Response {
 	request := lo.Must(http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/chat/completions", urlPrefix), bytes.NewBuffer(lo.Must(json.Marshal(map[string]any{
 		"model": "gpt-3.5-turbo",
 		"messages": []any{
@@ -144,7 +114,7 @@ func httpRequestGPT(ctx context.Context) <-chan mo.Result[*http.Response] {
 			},
 			map[string]any{
 				"role":    "user",
-				"content": "Hello!",
+				"content": "Hello! Please return me a story that contains 300 words at least",
 			},
 		},
 		"stream": true,
@@ -153,24 +123,9 @@ func httpRequestGPT(ctx context.Context) <-chan mo.Result[*http.Response] {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", openaiAPIKey))
 
-	cli := &http.Client{}
+	response := lo.Must((&http.Client{}).Do(request))
 
-	ch := make(chan mo.Result[*http.Response], 1)
-
-	go func() {
-		defer close(ch)
-
-		response, err := cli.Do(request)
-
-		if err != nil {
-			ch <- mo.Err[*http.Response](err)
-			return
-		}
-
-		ch <- mo.Ok[*http.Response](response)
-	}()
-
-	return ch
+	return response
 }
 
 func isEmpty(line string) bool {
