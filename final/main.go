@@ -72,7 +72,7 @@ func requestGPT() (string, string, <-chan string, error) {
 	select {
 	// duration for achieving the http response (status code, etc.)
 	// if status code can not be got within the duration, then we know current http request is timeout
-	case <-time.After(time.Second * 10):
+	case <-time.After(time.Second * 7):
 		cancel() // terminate the http request
 		return "", "", nil, errors.New("timeout")
 	// got response!!!
@@ -144,7 +144,7 @@ func httpRequestGPT(ctx context.Context) <-chan mo.Result[*http.Response] {
 			},
 			map[string]any{
 				"role":    "user",
-				"content": "Hello!",
+				"content": "Hello! Please return me a story that contains 300 words at least",
 			},
 		},
 		"stream": true,
